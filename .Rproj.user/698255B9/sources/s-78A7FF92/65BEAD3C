@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1530266109739.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "65BEAD3C",
+    "lastKnownWriteTime" : 1530027974,
+    "last_content_update" : 1530027974,
+    "path" : "~/Desktop/DataCourse/3 - Deep Analystics and Data visualization/1_ Define a data science process/M3T1/script1.R",
+    "project_path" : null,
+    "properties" : {
+        "cursorPosition" : "9,66",
+        "scrollLine" : "0"
+    },
+    "relative_order" : 2,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

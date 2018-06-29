@@ -1,0 +1,698 @@
+setwd("/Users/Andi/Desktop/DataCourse/3 - Deep Analystics and Data visualization/1_ Define a data science process/M3T1")
+
+library("dplyr")
+library("tidyr")
+library("lubridate")
+library("ggplot2")
+library("forecast")
+library("caret")
+
+Data <- read.csv("Data/household_power_consumption.txt", sep = ";", stringsAsFactors = FALSE)
+rawData <- Data
+
+#### foctor to numeric ####
+rawData$Global_active_power <- as.numeric(rawData$Global_active_power)
+rawData$Global_reactive_power <- as.numeric(rawData$Global_reactive_power)
+rawData$Voltage <-  as.numeric(rawData$Voltage)
+rawData$Global_intensity <- as.numeric(rawData$Global_intensity)
+rawData$Sub_metering_1 <- as.numeric(rawData$Sub_metering_1)
+rawData$Sub_metering_2 <- as.numeric(rawData$Sub_metering_2)
+
+#### rename variables ####
+names(rawData)[which(names(rawData) == "Global_active_power")] <- "ActivePower"
+names(rawData)[which(names(rawData) == "Global_reactive_power")] <- "ReactivePower"
+names(rawData)[which(names(rawData) == "Global_intensity")] <- "Current"
+names(rawData)[which(names(rawData) == "Sub_metering_1")] <- "sub1"
+names(rawData)[which(names(rawData) == "Sub_metering_2")] <- "sub2"
+names(rawData)[which(names(rawData) == "Sub_metering_3")] <- "sub3"
+
+#### date and time to one column ####
+rawData <- cbind(rawData,paste(rawData$Date,rawData$Time), stringsAsFactors=FALSE)
+colnames(rawData)[10] <- "DateTime"
+rawData <- rawData[,c(ncol(rawData), 1:(ncol(rawData)-1))]
+rawData$DateTime <- strptime(rawData$DateTime,"%d/%m/%Y %H:%M:%S")
+rawData$DateTime <- as.POSIXct(rawData$DateTime, tz = "UTC")
+rawData$Date <- as.Date(rawData$Date, "%d/%m/%Y")
+str(rawData)
+
+#### find 240 NA DateTime ####
+# emptyDates <- rawData[!complete.cases(rawData$DateTime),]
+# View(emptyDates)
+# # Time is set forward by one hour in March. Therefore no values! -> Delete empty values
+# rawData[which(!complete.cases(rawData$DateTime)),]
+# cleanDatesData <- rawData[-which(!complete.cases(rawData$DateTime)),]
+# change timezone to UTC, prblem solved.
+
+#### find other NAs 25979 ca 1% ####
+emptySubmeters <- rawData[!complete.cases(rawData$ActivePower),]
+# what to do with the empty values? -remove, fill up with neighbouring / median ...
+# possible errors: no power used? unlikely! / Power outage / Error in device!
+
+#### initial investigation of data ####
+#### mutate ... ####
+rawData <- mutate(rawData, ActivePowerWh = (ActivePower*1000/60))
+rawData <- mutate(rawData, ReactivePowerWh = (ReactivePower*1000/60))
+rawData <- mutate(rawData, unmeasuredEnergy = ActivePowerWh - (sub1 + sub2 + sub3))
+rawData <- mutate(rawData, ratioUnmeasured = unmeasuredEnergy / ActivePowerWh)
+rawData <- mutate(rawData, Year = factor(format(DateTime, "%Y")))
+rawData <- mutate(rawData, Month = factor(format(DateTime, "%m")))
+rawData <- mutate(rawData, MonthYear = factor(format(DateTime, "%Y/%m")))
+rawData <- mutate(rawData, wDay = factor(wday(DateTime, week_start = getOption("lubridate.week.start", 1))))
+rawData <- mutate(rawData, yDay = factor(yday(DateTime)))
+rawData <- mutate(rawData, month_wDay_hour = paste(
+  formatC(month(rawData$DateTime), width = 2, flag = "0"),
+  formatC(wday(rawData$DateTime), width = 2, flag = "0"), week_start = getOption("lubridate.week.start", 1),
+  formatC(hour(rawData$DateTime), width = 2, flag = "0"),
+  sep = "-"
+))
+rawData <- mutate(rawData, wDay_hour = paste(
+  formatC(wday(rawData$DateTime), width = 2, flag = "0"), week_start = getOption("lubridate.week.start", 1),
+  formatC(hour(rawData$DateTime), width = 2, flag = "0"),
+  sep = "-"
+))
+rawData <- mutate(rawData, Time15 = factor(format(floor_date(DateTime, "15 mins"), "%H/%M")))
+rawData <- mutate(rawData, weekYear = paste(
+  formatC(year(rawData$DateTime)),
+  formatC(week(rawData$DateTime))
+))
+
+#### remove 2006 ####
+rawData <- rawData[-which(rawData$Year == "2006"),]
+
+
+
+#### consumtions by ####
+consumption_by_year <- aggregate(rawData$ActivePowerWh, by = list(rawData$Year), FUN = function(x) mean(x, na.rm = T))
+consumption_by_year_2 <- rawData %>%
+  group_by(Year) %>% summarise(MeanActive = mean(ActivePowerWh, na.rm = T),
+                               MeanSub1 = mean(sub1, na.rm = T),
+                               MeanSub2 = mean(sub2, na.rm = T),
+                               MeanSub3 = mean(sub3, na.rm = T),
+                               MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T),
+                               MeanReactive = mean(ReactivePowerWh, na.rm = T),
+                               MeanUnmeasuredRatio = mean(ratioUnmeasured, na.rm = T))
+consumption_by_year_total_kWh <- rawData %>%
+  group_by(Year) %>% summarise(SumActivekWh = sum(ActivePowerWh/1000, na.rm = T),
+                               SumSub1kWh = sum(sub1/1000, na.rm = T),
+                               SumSub2kWh = sum(sub2/1000, na.rm = T),
+                               SumSub3kWh = sum(sub3/1000, na.rm = T),
+                               SumUnmeasuredkWh = sum(unmeasuredEnergy/1000, na.rm = T))
+consumption_by_month_year <- rawData %>%
+  group_by(MonthYear) %>%summarise(MeanActive = mean(ActivePowerWh, na.rm = T),
+                                    MeanSub1 = mean(sub1, na.rm = T),
+                                    MeanSub2 = mean(sub2, na.rm = T),
+                                    MeanSub3 = mean(sub3, na.rm = T),
+                                    MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+consumption_by_wday <- rawData %>% group_by(wDay) %>% summarise(Mean = mean(ActivePowerWh, na.rm = T))
+consumption_by_yday <- rawData %>% group_by(yDay) %>% summarise(Mean = mean(ActivePowerWh, na.rm = T))
+consumption_by_month_wDay_hour <- rawData %>% group_by(month_wDay_hour) %>% summarise(Mean = mean(ActivePowerWh, na.rm = T))
+consumption_by_wday_hour <-  rawData %>% group_by(wDay_hour) %>% summarise(Mean = mean(ActivePowerWh, na.rm = T))
+
+#### plots consumption by ####
+ggplot(data = consumption_by_year, aes(x = Group.1, y = x)) + geom_point()+ ylab("Active power [kW]") + xlab("Year")
+# plot unmeasuerd energy
+ggplot() + geom_line(data = consumption_by_year_2, aes(x = (seq_len(nrow(consumption_by_year_2))), y = MeanActive, colour = "Active Power")) +
+  geom_point(data = consumption_by_year_2, aes(x = (seq_len(nrow(consumption_by_year_2))), y = MeanUnmeasuredRatio, colour = "Unmeasured Ratio"))
+
+
+
+ggplot(data = consumption_by_month_year, aes(x = MonthYear, y = MeanActive)) + geom_point() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ylab("Active power [kW]") + ggtitle("Mean monthly active power consumption")
+ggplot(data = consumption_by_wday, aes(x = wDay, y = Mean)) + geom_point() + scale_x_discrete(labels=c("1" = "Mo", "2" = "Tu", "3" = "We", "4" = "Th", "5" = "Fr", "6" = "Sa", "7" = "Su")) + ggtitle("Mean daily active power consumption")
+ggplot(data = consumption_by_yday, aes(x = yDay, y = Mean)) + geom_point() + theme(axis.text.x = element_text(angle = 90, hjust = 1)) + ylab("Active power [kW]") + ggtitle("yDay mean active power consumption") + ylab("Active power [kW]")
+#ggplot(data = consumption_by_month_wDay_hour, aes(x = month_wDay_hour, y = Mean)) + geom_point()
+#ggplot(data = consumption_by_wday_hour, aes(x = wDay_hour, y = Mean)) + geom_point() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# month year nice
+ggplot() + geom_line(data = consumption_by_month_year, aes(x = (seq_len(nrow(consumption_by_month_year))), y = MeanActive, colour = "Active Power")) +
+  geom_line(data = consumption_by_month_year, aes(x = (seq_len(nrow(consumption_by_month_year))), y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = consumption_by_month_year, aes(x = (seq_len(nrow(consumption_by_month_year))), y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = consumption_by_month_year, aes(x = (seq_len(nrow(consumption_by_month_year))), y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = consumption_by_month_year, aes(x = (seq_len(nrow(consumption_by_month_year))), y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  scale_x_continuous(breaks = c(1:47), labels = c("01/07", "02/07", "03/07", "04/07", "05/07", "06/07", "07/07", "08/07", "09/07", "10/07", "11/07", "12/07",
+                                                  "01/08", "02/08", "03/08", "04/08", "05/08", "06/08", "07/08", "08/08", "09/08", "10/08", "11/08", "12/08",
+                                                  "01/09", "02/09", "03/09", "04/09", "05/09", "06/09", "07/09", "08/09", "09/09", "10/09", "11/09", "12/09",
+                                                  "01/10", "02/10", "03/10", "04/10", "05/10", "06/10", "07/10", "08/10", "09/10", "10/10", "11/10")) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), plot.title = element_text(hjust = 0.5)) +
+  xlab("Month/Year") + ylab("Power [Wh]") + ggtitle("Month/Year mean power consumption")
+# month year only sub1 and sub2
+ggplot() +
+  geom_line(data = consumption_by_month_year, aes(x = (seq_len(nrow(consumption_by_month_year))), y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = consumption_by_month_year, aes(x = (seq_len(nrow(consumption_by_month_year))), y = MeanSub2, colour = "Sub Laundry")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Sub Kitchen" = "red", "Sub Laundry" = "green")) +
+  scale_x_continuous(breaks = c(1:47), labels = c("01/07", "02/07", "03/07", "04/07", "05/07", "06/07", "07/07", "08/07", "09/07", "10/07", "11/07", "12/07",
+                                                  "01/08", "02/08", "03/08", "04/08", "05/08", "06/08", "07/08", "08/08", "09/08", "10/08", "11/08", "12/08",
+                                                  "01/09", "02/09", "03/09", "04/09", "05/09", "06/09", "07/09", "08/09", "09/09", "10/09", "11/09", "12/09",
+                                                  "01/10", "02/10", "03/10", "04/10", "05/10", "06/10", "07/10", "08/10", "09/10", "10/10", "11/10")) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), plot.title = element_text(hjust = 0.5)) +
+  xlab("Month/Year") + ylab("Power [Wh]") + ggtitle("Month/Year mean power consumption")
+
+#### linear model for all subs ####
+pa <- ggplot(data = consumption_by_month_year, aes(x = (seq_len(nrow(consumption_by_month_year))), y = MeanActive, colour = "Active Power")) +
+  geom_line() +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "grey")) +
+  scale_x_continuous(breaks = c(1:47), labels = c("01/07", "02/07", "03/07", "04/07", "05/07", "06/07", "07/07", "08/07", "09/07", "10/07", "11/07", "12/07",
+                                                  "01/08", "02/08", "03/08", "04/08", "05/08", "06/08", "07/08", "08/08", "09/08", "10/08", "11/08", "12/08",
+                                                  "01/09", "02/09", "03/09", "04/09", "05/09", "06/09", "07/09", "08/09", "09/09", "10/09", "11/09", "12/09",
+                                                  "01/10", "02/10", "03/10", "04/10", "05/10", "06/10", "07/10", "08/10", "09/10", "10/10", "11/10")) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), plot.title = element_text(hjust = 0.5)) +
+  xlab("Month/Year") + ylab("Power [Wh]") + ggtitle("Month/Year mean power consumption") + stat_smooth(method = "lm", se = F)
+
+lm_trend_active2_month <- ggplot_build(pa)$data[[2]]
+
+prozentuelle_verbesserung_lm_active2 <- (-(lm_trend_active2_month$y[1] - lm_trend_active2_month$y[80])/lm_trend_active2_month$y[1])
+prozentuelle_verbesserung_lm_active2/47*12*100
+
+# month year only unmeasured
+pu <- ggplot(data = consumption_by_month_year, aes(x = (seq_len(nrow(consumption_by_month_year))), y = MeanSub3, colour = "Unmeasured Energy")) +
+  geom_line() +
+  scale_color_manual(name = "Legend", values =
+                       c("Unmeasured Energy" = "grey")) +
+  scale_x_continuous(breaks = c(1:47), labels = c("01/07", "02/07", "03/07", "04/07", "05/07", "06/07", "07/07", "08/07", "09/07", "10/07", "11/07", "12/07",
+                                                  "01/08", "02/08", "03/08", "04/08", "05/08", "06/08", "07/08", "08/08", "09/08", "10/08", "11/08", "12/08",
+                                                  "01/09", "02/09", "03/09", "04/09", "05/09", "06/09", "07/09", "08/09", "09/09", "10/09", "11/09", "12/09",
+                                                  "01/10", "02/10", "03/10", "04/10", "05/10", "06/10", "07/10", "08/10", "09/10", "10/10", "11/10")) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), plot.title = element_text(hjust = 0.5)) +
+  xlab("Month/Year") + ylab("Power [Wh]") + ggtitle("Month/Year mean power consumption") + stat_smooth(method = "lm", se = F)
+
+
+lm_trend_unmeasured_month <- ggplot_build(pu)$data[[2]]
+steigung_lm_unmeasured <- (lm_trend_unmeasured_month$y[1] - lm_trend_unmeasured_month$y[80])/(lm_trend_unmeasured_month$x[1] - lm_trend_unmeasured_month$x[80])
+
+prozentuelle_verbesserung_lm_unmeasured <- (-(lm_trend_unmeasured_month$y[1] - lm_trend_unmeasured_month$y[80])/lm_trend_unmeasured_month$y[1])
+prozentuelle_verbesserung_lm_unmeasured/47*12*100
+
+# month year only sub1
+pu <- ggplot(data = consumption_by_month_year, aes(x = (seq_len(nrow(consumption_by_month_year))), y = MeanSub1, colour = "Unmeasured Energy")) +
+  geom_line() +
+  scale_color_manual(name = "Legend", values =
+                       c("Unmeasured Energy" = "grey")) +
+  scale_x_continuous(breaks = c(1:47), labels = c("01/07", "02/07", "03/07", "04/07", "05/07", "06/07", "07/07", "08/07", "09/07", "10/07", "11/07", "12/07",
+                                                  "01/08", "02/08", "03/08", "04/08", "05/08", "06/08", "07/08", "08/08", "09/08", "10/08", "11/08", "12/08",
+                                                  "01/09", "02/09", "03/09", "04/09", "05/09", "06/09", "07/09", "08/09", "09/09", "10/09", "11/09", "12/09",
+                                                  "01/10", "02/10", "03/10", "04/10", "05/10", "06/10", "07/10", "08/10", "09/10", "10/10", "11/10")) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), plot.title = element_text(hjust = 0.5)) +
+  xlab("Month/Year") + ylab("Power [Wh]") + ggtitle("Month/Year mean power consumption") + stat_smooth(method = "lm", se = F)
+
+
+lm_trend_unmeasured_month <- ggplot_build(pu)$data[[2]]
+steigung_lm_unmeasured <- (lm_trend_unmeasured_month$y[1] - lm_trend_unmeasured_month$y[80])/(lm_trend_unmeasured_month$x[1] - lm_trend_unmeasured_month$x[80])
+
+prozentuelle_verbesserung_lm_unmeasured <- (-(lm_trend_unmeasured_month$y[1] - lm_trend_unmeasured_month$y[80])/lm_trend_unmeasured_month$y[1])
+prozentuelle_verbesserung_lm_unmeasured/47*12*100
+
+#### Winter week: wDay hour ####
+dataJan <- rawData[which(rawData$Month == "01"),]
+jan_by_wday <- dataJan %>% group_by(wDay_hour) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+# nice plotting
+ggplot() + 
+  geom_line(data = jan_by_wday, aes(x = (seq_len(nrow(jan_by_wday))/24)+1, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = jan_by_wday, aes(x = (seq_len(nrow(jan_by_wday))/24)+1, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = jan_by_wday, aes(x = (seq_len(nrow(jan_by_wday))/24)+1, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = jan_by_wday, aes(x = (seq_len(nrow(jan_by_wday))/24)+1, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = jan_by_wday, aes(x = (seq_len(nrow(jan_by_wday))/24)+1, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+                      plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("January wDay mean power consumption") +
+  xlab("Day of the week") + scale_x_continuous(breaks = c(1:8))
+
+#### Winter Wednesdey ####
+dataJanWednesday <- dataJan[which(dataJan$wDay == "4"),]
+jan_Wednesday <- dataJanWednesday %>% group_by(Time15) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+ggplot() +
+  geom_line(data = jan_Wednesday, aes(x = seq_len(nrow(jan_Wednesday))/4, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = jan_Wednesday, aes(x = seq_len(nrow(jan_Wednesday))/4, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = jan_Wednesday, aes(x = seq_len(nrow(jan_Wednesday))/4, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = jan_Wednesday, aes(x = seq_len(nrow(jan_Wednesday))/4, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = jan_Wednesday, aes(x = seq_len(nrow(jan_Wednesday))/4, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("January Wednesday mean power consumption") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+#### Winter Sunday ####
+dataJanSunday <- dataJan[which(dataJan$wDay == "7"),]
+janSunday <- dataJanSunday %>% group_by(Time15) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+ggplot() +
+  geom_line(data = janSunday, aes(x = seq_len(nrow(janSunday))/4, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = janSunday, aes(x = seq_len(nrow(janSunday))/4, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = janSunday, aes(x = seq_len(nrow(janSunday))/4, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = janSunday, aes(x = seq_len(nrow(janSunday))/4, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = janSunday, aes(x = seq_len(nrow(janSunday))/4, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("January Sunday mean power consumption") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+
+#### Spring week: wday hour ####
+dataApril <- rawData[which(rawData$Month == "04"),]
+apr_by_wday <- dataApril%>% group_by(wDay_hour) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+ggplot() + 
+  geom_line(data = apr_by_wday, aes(x = (seq_len(nrow(apr_by_wday))/24)+1, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = apr_by_wday, aes(x = (seq_len(nrow(apr_by_wday))/24)+1, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = apr_by_wday, aes(x = (seq_len(nrow(apr_by_wday))/24)+1, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = apr_by_wday, aes(x = (seq_len(nrow(apr_by_wday))/24)+1, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = apr_by_wday, aes(x = (seq_len(nrow(apr_by_wday))/24)+1, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("April wDay mean power consumption") +
+  xlab("Day of the week") + scale_x_continuous(breaks = c(1:8))
+
+#### Spring Wednesday ####
+dataAprWednesday <- dataApril[which(dataApril$wDay == "3"),]
+apr_Wednesday <- dataAprWednesday %>% group_by(Time15) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+ggplot() +
+  geom_line(data = apr_Wednesday, aes(x = seq_len(nrow(apr_Wednesday))/4, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = apr_Wednesday, aes(x = seq_len(nrow(apr_Wednesday))/4, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = apr_Wednesday, aes(x = seq_len(nrow(apr_Wednesday))/4, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = apr_Wednesday, aes(x = seq_len(nrow(apr_Wednesday))/4, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = apr_Wednesday, aes(x = seq_len(nrow(apr_Wednesday))/4, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("April Wednesday mean power consumption") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+#### Spring Sunday ####
+dataAprSunday <- dataApril[which(dataApril$wDay == "7"),]
+apr_Sunday <- dataAprSunday %>% group_by(Time15) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+ggplot() +
+  geom_line(data = apr_Sunday, aes(x = seq_len(nrow(apr_Sunday))/4, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = apr_Sunday, aes(x = seq_len(nrow(apr_Sunday))/4, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = apr_Sunday, aes(x = seq_len(nrow(apr_Sunday))/4, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = apr_Sunday, aes(x = seq_len(nrow(apr_Sunday))/4, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = apr_Sunday, aes(x = seq_len(nrow(apr_Sunday))/4, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("April Sunday mean power consumption") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+#### Summer week ####
+dataAugust <- rawData[which(rawData$Month == "08"),]
+aug_by_wday <- dataAugust%>% group_by(wDay_hour) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+ggplot() + 
+  geom_line(data = aug_by_wday, aes(x = (seq_len(nrow(aug_by_wday))/24)+1, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = aug_by_wday, aes(x = (seq_len(nrow(aug_by_wday))/24)+1, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = aug_by_wday, aes(x = (seq_len(nrow(aug_by_wday))/24)+1, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = aug_by_wday, aes(x = (seq_len(nrow(aug_by_wday))/24)+1, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = aug_by_wday, aes(x = (seq_len(nrow(aug_by_wday))/24)+1, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("August wDay mean power consumption") +
+  xlab("Day of the week") + scale_x_continuous(breaks = c(1:8))
+
+#### Summer Wednesday ####
+dataAugWednesday <- dataAugust[which(dataApril$wDay == "3"),]
+aug_Wednesday <- dataAugWednesday %>% group_by(Time15) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+ggplot() +
+  geom_line(data = aug_Wednesday, aes(x = seq_len(nrow(aug_Wednesday))/4, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = aug_Wednesday, aes(x = seq_len(nrow(aug_Wednesday))/4, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = aug_Wednesday, aes(x = seq_len(nrow(aug_Wednesday))/4, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = aug_Wednesday, aes(x = seq_len(nrow(aug_Wednesday))/4, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = aug_Wednesday, aes(x = seq_len(nrow(aug_Wednesday))/4, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("August Wednesday mean power consumption") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+#### Summer Sunday ####
+dataAugSunday <- dataAugust[which(dataApril$wDay == "7"),]
+aug_Sunday <- dataAugSunday %>% group_by(Time15) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+ggplot() +
+  geom_line(data = aug_Sunday, aes(x = seq_len(nrow(aug_Sunday))/4, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = aug_Sunday, aes(x = seq_len(nrow(aug_Sunday))/4, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = aug_Sunday, aes(x = seq_len(nrow(aug_Sunday))/4, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = aug_Sunday, aes(x = seq_len(nrow(aug_Sunday))/4, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = aug_Sunday, aes(x = seq_len(nrow(aug_Sunday))/4, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("August Sunday mean power consumption") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+#### Autumn week ####
+dataOctober <- rawData[which(rawData$Month == "10"),]
+oct_by_wday <- dataOctober%>% group_by(wDay_hour) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+ggplot() + 
+  geom_line(data = oct_by_wday, aes(x = (seq_len(nrow(oct_by_wday))/24)+1, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = oct_by_wday, aes(x = (seq_len(nrow(oct_by_wday))/24)+1, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = oct_by_wday, aes(x = (seq_len(nrow(oct_by_wday))/24)+1, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = oct_by_wday, aes(x = (seq_len(nrow(oct_by_wday))/24)+1, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = oct_by_wday, aes(x = (seq_len(nrow(oct_by_wday))/24)+1, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("October wDay mean power consumption") +
+  xlab("Day of the week") + scale_x_continuous(breaks = c(1:8))
+
+#### October Wednesday ####
+dataOctWednesday <- dataOctober[which(dataApril$wDay == "3"),]
+oct_Wednesday <- dataOctWednesday %>% group_by(Time15) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+ggplot() +
+  geom_line(data = oct_Wednesday, aes(x = seq_len(nrow(oct_Wednesday))/4, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = oct_Wednesday, aes(x = seq_len(nrow(oct_Wednesday))/4, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = oct_Wednesday, aes(x = seq_len(nrow(oct_Wednesday))/4, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = oct_Wednesday, aes(x = seq_len(nrow(oct_Wednesday))/4, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = oct_Wednesday, aes(x = seq_len(nrow(oct_Wednesday))/4, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("October Wednesday mean power consumption") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+#### October Sunday ####
+dataOctSunday <- dataOctober[which(dataApril$wDay == "7"),]
+oct_Sunday <- dataOctSunday %>% group_by(Time15) %>%
+  summarise(MeanActive = mean(ActivePowerWh, na.rm = T), MeanSub1 = mean(sub1, na.rm = T), MeanSub2 = mean(sub2, na.rm = T), MeanSub3 = mean(sub3, na.rm = T), MeanUnmeasured = mean(unmeasuredEnergy, na.rm = T))
+
+ggplot() +
+  geom_line(data = oct_Sunday, aes(x = seq_len(nrow(oct_Sunday))/4, y = MeanActive, colour = "Active Power")) +
+  geom_line(data = oct_Sunday, aes(x = seq_len(nrow(oct_Sunday))/4, y = MeanSub1, colour = "Sub Kitchen")) +
+  geom_line(data = oct_Sunday, aes(x = seq_len(nrow(oct_Sunday))/4, y = MeanSub2, colour = "Sub Laundry")) +
+  geom_line(data = oct_Sunday, aes(x = seq_len(nrow(oct_Sunday))/4, y = MeanSub3, colour = "Sub Utility")) +
+  geom_line(data = oct_Sunday, aes(x = seq_len(nrow(oct_Sunday))/4, y = MeanUnmeasured, colour = "Unmeasured Energy")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Active Power" = "black", "Sub Kitchen" = "red", "Sub Laundry" = "green", "Sub Utility" = "blue", "Unmeasured Energy" = "grey")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("October Sunday mean power consumption") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+#### season comparison 1 week ####
+# mean active
+ggplot() +
+  geom_line(data = jan_by_wday,aes(x = (seq_len(nrow(jan_by_wday))/24)+1, y = MeanActive, colour = "Winter_Jan")) +
+  geom_line(data = apr_by_wday,aes(x = (seq_len(nrow(apr_by_wday))/24)+1, y = MeanActive, colour = "Spring_Apr")) +
+  geom_line(data = aug_by_wday,aes(x = (seq_len(nrow(aug_by_wday))/24)+1, y = MeanActive, colour = "Summer_Aug")) +
+  geom_line(data = oct_by_wday,aes(x = (seq_len(nrow(oct_by_wday))/24)+1, y = MeanActive, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Mean Active Energy Season comparison") +
+  xlab("Day of the week") + scale_x_continuous(breaks = c(1:8))
+
+# sub 1 - kitchen
+ggplot() +
+  geom_line(data = jan_by_wday,aes(x = (seq_len(nrow(jan_by_wday))/24)+1, y = MeanSub1, colour = "Winter_Jan")) +
+  geom_line(data = apr_by_wday,aes(x = (seq_len(nrow(apr_by_wday))/24)+1, y = MeanSub1, colour = "Spring_Apr")) +
+  geom_line(data = aug_by_wday,aes(x = (seq_len(nrow(aug_by_wday))/24)+1, y = MeanSub1, colour = "Summer_Aug")) +
+  geom_line(data = oct_by_wday,aes(x = (seq_len(nrow(oct_by_wday))/24)+1, y = MeanSub1, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Sub 1 - Kitchen Energy Season comparison") +
+  xlab("Day of the week") + scale_x_continuous(breaks = c(1:8))
+
+# sub 2 - Laundry
+ggplot() +
+  geom_line(data = jan_by_wday,aes(x = (seq_len(nrow(jan_by_wday))/24)+1, y = MeanSub2, colour = "Winter_Jan")) +
+  geom_line(data = apr_by_wday,aes(x = (seq_len(nrow(apr_by_wday))/24)+1, y = MeanSub2, colour = "Spring_Apr")) +
+  geom_line(data = aug_by_wday,aes(x = (seq_len(nrow(aug_by_wday))/24)+1, y = MeanSub2, colour = "Summer_Aug")) +
+  geom_line(data = oct_by_wday,aes(x = (seq_len(nrow(oct_by_wday))/24)+1, y = MeanSub2, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Sub 2 - Laundry Energy Season comparison") +
+  xlab("Day of the week") + scale_x_continuous(breaks = c(1:8))
+
+# sub 3 - Utility
+ggplot() +
+  geom_line(data = jan_by_wday,aes(x = (seq_len(nrow(jan_by_wday))/24)+1, y = MeanSub3, colour = "Winter_Jan")) +
+  geom_line(data = apr_by_wday,aes(x = (seq_len(nrow(apr_by_wday))/24)+1, y = MeanSub3, colour = "Spring_Apr")) +
+  geom_line(data = aug_by_wday,aes(x = (seq_len(nrow(aug_by_wday))/24)+1, y = MeanSub3, colour = "Summer_Aug")) +
+  geom_line(data = oct_by_wday,aes(x = (seq_len(nrow(oct_by_wday))/24)+1, y = MeanSub3, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Sub 3 - Utility Energy Season comparison") +
+  xlab("Day of the week") + scale_x_continuous(breaks = c(1:8))
+
+# Unmeasured Energy
+ggplot() +
+  geom_line(data = jan_by_wday,aes(x = (seq_len(nrow(jan_by_wday))/24)+1, y = MeanUnmeasured, colour = "Winter_Jan")) +
+  geom_line(data = apr_by_wday,aes(x = (seq_len(nrow(apr_by_wday))/24)+1, y = MeanUnmeasured, colour = "Spring_Apr")) +
+  geom_line(data = aug_by_wday,aes(x = (seq_len(nrow(aug_by_wday))/24)+1, y = MeanUnmeasured, colour = "Summer_Aug")) +
+  geom_line(data = oct_by_wday,aes(x = (seq_len(nrow(oct_by_wday))/24)+1, y = MeanUnmeasured, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Mean Unmeasured Energy Season comparison") +
+  xlab("Day of the week") + scale_x_continuous(breaks = c(1:8))
+
+
+#### season comparison: weekday / Wednesday ####
+# Mean Active
+ggplot() +
+  geom_line(data = jan_Wednesday, aes(x = seq_len(nrow(jan_Wednesday))/4, y = MeanActive, colour = "Winter_Jan")) +
+  geom_line(data = apr_Wednesday, aes(x = seq_len(nrow(apr_Wednesday))/4, y = MeanActive, colour = "Spring_Apr")) +
+  geom_line(data = aug_Wednesday, aes(x = seq_len(nrow(aug_Wednesday))/4, y = MeanActive, colour = "Summer_Aug")) +
+  geom_line(data = oct_Wednesday, aes(x = seq_len(nrow(oct_Wednesday))/4, y = MeanActive, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Wednesday Mean Active Energy - season comparison") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+# Sub 1
+ggplot() +
+  geom_line(data = jan_Wednesday, aes(x = seq_len(nrow(jan_Wednesday))/4, y = MeanSub1, colour = "Winter_Jan")) +
+  geom_line(data = apr_Wednesday, aes(x = seq_len(nrow(apr_Wednesday))/4, y = MeanSub1, colour = "Spring_Apr")) +
+  geom_line(data = aug_Wednesday, aes(x = seq_len(nrow(aug_Wednesday))/4, y = MeanSub1, colour = "Summer_Aug")) +
+  geom_line(data = oct_Wednesday, aes(x = seq_len(nrow(oct_Wednesday))/4, y = MeanSub1, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Wednesday Sub 1 Kitchen - season comparison") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+  
+# Sub 2
+ggplot() +
+  geom_line(data = jan_Wednesday, aes(x = seq_len(nrow(jan_Wednesday))/4, y = MeanSub2, colour = "Winter_Jan")) +
+  geom_line(data = apr_Wednesday, aes(x = seq_len(nrow(apr_Wednesday))/4, y = MeanSub2, colour = "Spring_Apr")) +
+  geom_line(data = aug_Wednesday, aes(x = seq_len(nrow(aug_Wednesday))/4, y = MeanSub2, colour = "Summer_Aug")) +
+  geom_line(data = oct_Wednesday, aes(x = seq_len(nrow(oct_Wednesday))/4, y = MeanSub2, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Wednesday Sub 2 Laundry - season comparison") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+# Sub 3
+ggplot() +
+  geom_line(data = jan_Wednesday, aes(x = seq_len(nrow(jan_Wednesday))/4, y = MeanSub3, colour = "Winter_Jan")) +
+  geom_line(data = apr_Wednesday, aes(x = seq_len(nrow(apr_Wednesday))/4, y = MeanSub3, colour = "Spring_Apr")) +
+  geom_line(data = aug_Wednesday, aes(x = seq_len(nrow(aug_Wednesday))/4, y = MeanSub3, colour = "Summer_Aug")) +
+  geom_line(data = oct_Wednesday, aes(x = seq_len(nrow(oct_Wednesday))/4, y = MeanSub3, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Wednesday Sub 3 Utility - season comparison") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+# Unmeasured Energy
+ggplot() +
+  geom_line(data = jan_Wednesday, aes(x = seq_len(nrow(jan_Wednesday))/4, y = MeanUnmeasured, colour = "Winter_Jan")) +
+  geom_line(data = apr_Wednesday, aes(x = seq_len(nrow(apr_Wednesday))/4, y = MeanUnmeasured, colour = "Spring_Apr")) +
+  geom_line(data = aug_Wednesday, aes(x = seq_len(nrow(aug_Wednesday))/4, y = MeanUnmeasured, colour = "Summer_Aug")) +
+  geom_line(data = oct_Wednesday, aes(x = seq_len(nrow(oct_Wednesday))/4, y = MeanUnmeasured, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Wednesday Unmeasured Energy - season comparison") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+#### season comparison: weekend ####
+# Mean Active
+ggplot() +
+  geom_line(data = janSunday, aes(x = seq_len(nrow(janSunday))/4, y = MeanActive, colour = "Winter_Jan")) +
+  geom_line(data = apr_Sunday, aes(x = seq_len(nrow(apr_Sunday))/4, y = MeanActive, colour = "Spring_Apr")) +
+  geom_line(data = aug_Sunday, aes(x = seq_len(nrow(aug_Sunday))/4, y = MeanActive, colour = "Summer_Aug")) +
+  geom_line(data = oct_Sunday, aes(x = seq_len(nrow(oct_Sunday))/4, y = MeanActive, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Sunday Mean Active Energy - season comparison") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+# Sub 1
+ggplot() +
+  geom_line(data = janSunday, aes(x = seq_len(nrow(janSunday))/4, y = MeanSub1, colour = "Winter_Jan")) +
+  geom_line(data = apr_Sunday, aes(x = seq_len(nrow(apr_Sunday))/4, y = MeanSub1, colour = "Spring_Apr")) +
+  geom_line(data = aug_Sunday, aes(x = seq_len(nrow(aug_Sunday))/4, y = MeanSub1, colour = "Summer_Aug")) +
+  geom_line(data = oct_Sunday, aes(x = seq_len(nrow(oct_Sunday))/4, y = MeanSub1, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Sunday Sub 1 Kitchen - season comparison") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+# Sub 2
+ggplot() +
+  geom_line(data = janSunday, aes(x = seq_len(nrow(janSunday))/4, y = MeanSub2, colour = "Winter_Jan")) +
+  geom_line(data = apr_Sunday, aes(x = seq_len(nrow(apr_Sunday))/4, y = MeanSub2, colour = "Spring_Apr")) +
+  geom_line(data = aug_Sunday, aes(x = seq_len(nrow(aug_Sunday))/4, y = MeanSub2, colour = "Summer_Aug")) +
+  geom_line(data = oct_Sunday, aes(x = seq_len(nrow(oct_Sunday))/4, y = MeanSub2, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Sunday Sub 2 Laundry - season comparison") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+# Sub 3
+ggplot() +
+  geom_line(data = janSunday, aes(x = seq_len(nrow(janSunday))/4, y = MeanSub3, colour = "Winter_Jan")) +
+  geom_line(data = apr_Sunday, aes(x = seq_len(nrow(apr_Sunday))/4, y = MeanSub3, colour = "Spring_Apr")) +
+  geom_line(data = aug_Sunday, aes(x = seq_len(nrow(aug_Sunday))/4, y = MeanSub3, colour = "Summer_Aug")) +
+  geom_line(data = oct_Sunday, aes(x = seq_len(nrow(oct_Sunday))/4, y = MeanSub3, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Sunday Sub 3 Utility - season comparison") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+# Unmeasured Energy
+ggplot() +
+  geom_line(data = janSunday, aes(x = seq_len(nrow(janSunday))/4, y = MeanUnmeasured, colour = "Winter_Jan")) +
+  geom_line(data = apr_Sunday, aes(x = seq_len(nrow(apr_Sunday))/4, y = MeanUnmeasured, colour = "Spring_Apr")) +
+  geom_line(data = aug_Sunday, aes(x = seq_len(nrow(aug_Sunday))/4, y = MeanUnmeasured, colour = "Summer_Aug")) +
+  geom_line(data = oct_Sunday, aes(x = seq_len(nrow(oct_Sunday))/4, y = MeanUnmeasured, colour = "Autumn_Oct")) +
+  scale_color_manual(name = "Legend", values =
+                       c("Winter_Jan" = "black", "Spring_Apr" = "green", "Summer_Aug" = "orange", "Autumn_Oct" = "brown")) +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5),
+        plot.title = element_text(hjust = 0.5)) + 
+  ylab("Power [Wh]") + ggtitle("Sunday Unmeasured Energy - season comparison") +
+  xlab("Hour of the Day") + scale_x_continuous(breaks = c(0:24))
+
+#### Time Series MonthYear ####
+ts_monthYear_active <- rawData %>% group_by(MonthYear) %>% summarise(Active = mean(ActivePowerWh, na.rm = T))
+ts_MY <- ts(ts_monthYear_active$Active, frequency = 12, start = c(2007, 1))
+df_ts_MY <- data.frame(Energy = ts_MY, as.integer(time(ts_monthYear_active$MonthYear)))
+names(df_ts_MY) <- c("Energy", "Time")
+forecast_Model_MY_tslm <- tslm(Energy~season+trend, df_ts_MY)
+my_fc_tslm_MY <- forecast(forecast_Model_MY_tslm, h=80, level = c(60))
+autoplot(my_fc_tslm_MY)
+summary(my_fc_tslm_MY)
+
+#### Decompose Monthyear Timeseries ####
+ts_MY_decompose <- decompose(ts_MY)
+autoplot(ts_MY_decompose$seasonal)
+autoplot(ts_MY_decompose$trend)
+autoplot(ts_MY_decompose$random)
+autoplot(ts_MY_decompose)
+
+#### linear regression for monthYear trend ####
+monthYear_trend_data <- data.frame(as.integer(time(ts_monthYear_active$MonthYear)), TrendValue = ts_MY_decompose$trend)
+names(monthYear_trend_data) <- c("MonthYear", "TrendValue")
+# remove NAs
+monthYear_trend_data <- monthYear_trend_data[!is.na(monthYear_trend_data$TrendValue),]
+#plot with linear model
+p <- ggplot(data = monthYear_trend_data, aes(x = MonthYear, y = TrendValue)) + geom_line(data = monthYear_trend_data, aes(x = MonthYear, y = TrendValue)) + stat_smooth(method = "lm", se = F)
+p
+lm_trend_active_month <- ggplot_build(p)$data[[2]]
+steigung_lm_active <- (lm_trend_active_month$y[1] - lm_trend_active_month$y[80])/(lm_trend_active_month$x[1] - lm_trend_active_month$x[80])
+prozentuelle_verbesserung_lm_active <- (-(lm_trend_active_month$y[1] - lm_trend_active_month$y[80])/lm_trend_active_month$y[1])
+prozentuelle_verbesserung_lm_active/34*12*100
+#calculate slope from 2 points
+# ggplot as df - steigung vom 1ten zum letzten punkt berechnen, dann verbesserung pro monat!
+
+
+#### Assess forecast MonthYear ####
+ts_monthYear_active_predict <- ts_monthYear_active[c(1:36),]
+ts_MY_predict <- ts(ts_monthYear_active_predict$Active, frequency = 12, start = c(2007, 1))
+df_ts_MY_predict <- data.frame(Energy = ts_MY_predict, as.numeric(time(ts_monthYear_active_predict$MonthYear)))
+names(df_ts_MY_predict) <- c("Energy", "Time")
+forecast_Model_My_tslm_predict <- tslm(Energy~season+trend, df_ts_MY_predict)
+my_fc_tslm_predict_MY <- forecast(forecast_Model_My_tslm_predict, h = 11, level = c(40))
+
+#plot
+autoplot(my_fc_tslm_predict_MY) +
+  geom_line(data = df_ts_MY, aes(x = (0:46)/12 + 2007, y = Energy), colour = "red")
+
+#asses
+postResample(my_fc_tslm_predict_MY$mean, df_ts_MY$Energy[37:47])
+
+#### Time Series YearWeak ####
+ts_weekYear_active <- rawData %>% group_by(weekYear) %>% summarise(Active = sum(ActivePowerWh, na.rm = T))
+ts_WY <- ts(ts_weekYear_active$Active, frequency = 52, start = c(2007, 1))
+df_ts_WY <- data.frame(Energy = ts_WY, as.numeric(time(ts_weekYear_active$weekYear)))
+names(df_ts_WY) <- c("Energy", "WeekYear")
+forecast_Model_WY_tslm <- tslm(Energy~season+trend, df_ts_WY)
+my_fc_tslm_WY <- forecast(forecast_Model_WY_tslm, h = 200, level = c(90))
+autoplot(my_fc_tslm_WY)
+
+#### assess forecast weekyear ####
+ts_weekYear_active_predict <- ts_weekYear_active[c(1:156),]
+ts_WY_predict <- ts(ts_weekYear_active_predict$Active, frequency = 52, start = c(2007, 1))
+df_ts_WY_predict <- data.frame(Energy = ts_WY_predict, as.numeric(time(ts_weekYear_active_predict$weekYear)))
+names(df_ts_WY_predict) <- c("Energy", "WeekYear")
+forecast_Model_WY_predict_tslm <- tslm(Energy~season+trend, df_ts_WY_predict)
+my_fc__tslm_WY_predict <- forecast(forecast_Model_WY_predict_tslm, h = 51, level = c(50))
+autoplot(my_fc__tslm_WY_predict)
+
+autoplot(my_fc__tslm_WY_predict) + 
+        geom_line(data = df_ts_WY, aes(x = ((0:206))/52 + 2007, y = Energy), colour = "red")
+
+#### holt winters ####
+#### january week forecast ####
+
+#### linear regression for all trendlines!! ####
+
+
