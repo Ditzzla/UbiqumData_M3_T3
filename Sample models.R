@@ -21,29 +21,29 @@ smp1_rows <- sample.int(n = nrow(sample1_building_prediction), size = floor(.75 
 
 s1_train <- sample1_building_prediction[smp1_rows,]
 s1_test <- sample1_building_prediction[-smp1_rows,]
+# 
+# train_control_1 <- trainControl(method ="repeatedcv",
+#                               number = 10
+#                               )
+# 
+# 
+# kNN_s1 <- train(BUILDINGID ~. -LONGITUDE -LATITUDE -FLOOR -SPACEID -RELATIVEPOSITION,
+#                 data = s1_train,
+#                 method = "knn",
+#                 trControl = train_control_1)
+# 
+# testPrediction_kNN_s1 <- predict(kNN_s1, newdata = s1_test)
+# 
+# postResample(testPrediction_kNN_s1, s1_test$BUILDINGID)
+# # kNN with full sample cv = 10 repeated Accuracy 100%
+# 
+# # confusion Matrix
+# confusionMatrix(testPrediction_kNN_s1, s1_test$BUILDINGID)
+# 
+# which(s1_test$BUILDINGID != testPrediction_kNN_s1)
+# s1_test[which(s1_test$BUILDINGID != testPrediction_kNN_s1),]
 
-train_control_1 <- trainControl(method ="repeatedcv",
-                              number = 10
-                              )
-
-
-kNN_s1 <- train(BUILDINGID ~. -LONGITUDE -LATITUDE -FLOOR -SPACEID -RELATIVEPOSITION,
-                data = s1_train,
-                method = "knn",
-                trControl = train_control_1)
-
-testPrediction_kNN_s1 <- predict(kNN_s1, newdata = s1_test)
-
-postResample(testPrediction_kNN_s1, s1_test$BUILDINGID)
-# kNN with full sample cv = 10 repeated Accuracy 100%
-
-# confusion Matrix
-confusionMatrix(testPrediction_kNN_s1, s1_test$BUILDINGID)
-
-which(s1_test$BUILDINGID != testPrediction_kNN_s1)
-s1_test[which(s1_test$BUILDINGID != testPrediction_kNN_s1),]
-
-write.csv(testPrediction_kNN_s1, file = "UJIndoorLoc/BuildingPrediction.csv")
+# write.csv(testPrediction_kNN_s1, file = "UJIndoorLoc/BuildingPrediction.csv", row.names = FALSE)
 
 ##########################
 #### Floor prediction ####
